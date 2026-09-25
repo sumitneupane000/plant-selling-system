@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "windows"]
 }
 
 datasource db {
@@ -114,16 +115,26 @@ model Wishlist {
 }
 
 model Order {
-  id           String      @id @default(uuid())
-  user_id      String
-  total_amount Decimal     @db.Decimal(10, 2)
-  status       OrderStatus @default(PENDING)
-  order_date   DateTime    @default(now())
-  created_at   DateTime    @default(now())
-  updated_at   DateTime    @updatedAt
-  order_items  OrderItem[]
-  user         User        @relation(fields: [user_id], references: [id])
-  payment      Payment?
+  id                        String           @id @default(uuid())
+  user_id                   String
+  total_amount              Decimal          @db.Decimal(10, 2)
+  status                    OrderStatus      @default(PENDING)
+  cancellation_status       String?
+  cancellation_reason       String?
+  cancellation_detail       String?
+  cancellation_evidence     String?
+  cancellation_requested_at DateTime?
+  cancelled_at              DateTime?
+  cancelled_by              String?
+  vendor_note               String?
+  admin_note                String?
+  order_date                DateTime         @default(now())
+  created_at                DateTime         @default(now())
+  updated_at                DateTime         @updatedAt
+  order_items               OrderItem[]
+  user                      User             @relation(fields: [user_id], references: [id])
+  payment                   Payment?
+  audit_logs                RefundAuditLog[]
 
   @@map("orders")
 }
@@ -131,24 +142,58 @@ model Order {
 model OrderItem {
   id         String   @id @default(uuid())
   order_id   String
-  product_id String?  // nullable — product can be deleted while preserving order history
+  product_id String?
   quantity   Int
   price      Decimal  @db.Decimal(10, 2)
   order      Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
-  product    Product? @relation(fields: [product_id], references: [id], onDelete: SetNull)
+  product    Product? @relation(fields: [product_id], references: [id])
 
   @@map("order_items")
 }
 
 model Payment {
-  id             String  @id @default(uuid())
-  order_id       String  @unique
-  payment_method String
-  payment_status String  @default("PENDING")
-  transaction_id String?
-  order          Order   @relation(fields: [order_id], references: [id], onDelete: Cascade)
+  id                    String    @id @default(uuid())
+  order_id              String    @unique
+  payment_method        String
+  payment_status        String    @default("PENDING")
+  transaction_id        String?
+  refund_status         String?
+  refund_requested_at   DateTime?
+  refunded_at           DateTime?
+  refund_amount         Decimal?  @db.Decimal(10, 2)
+  refund_transaction_id String?
+  refund_reason         String?
+  order                 Order     @relation(fields: [order_id], references: [id], onDelete: Cascade)
 
   @@map("payments")
+}
+
+model RefundAuditLog {
+  id              String   @id @default(uuid())
+  order_id        String
+  actor_id        String
+  actor_role      String
+  action          String
+  previous_status String?
+  new_status      String?
+  reason_note     String?
+  created_at      DateTime @default(now())
+  order           Order    @relation(fields: [order_id], references: [id], onDelete: Cascade)
+
+  @@map("refund_audit_logs")
+}
+
+model AdminNotification {
+  id         String   @id @default(uuid())
+  type       String
+  title      String
+  message    String
+  order_id   String?
+  vendor_id  String?
+  is_read    Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  @@map("admin_notifications")
 }
 
 model Review {
@@ -187,4 +232,7 @@ enum OrderStatus {
   SHIPPED
   DELIVERED
   CANCELLED
+  CANCELLATION_REQUESTED
+  EVIDENCE_REQUESTED
+  ADMIN_REVIEW
 }

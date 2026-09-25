@@ -7,6 +7,8 @@ async function cleanData() {
 
   // 1. Delete dependent transactional records
   await prisma.payment.deleteMany({});
+  await prisma.refundAuditLog.deleteMany({});
+  await prisma.adminNotification.deleteMany({});
   await prisma.orderItem.deleteMany({});
   await prisma.order.deleteMany({});
   await prisma.cartItem.deleteMany({});

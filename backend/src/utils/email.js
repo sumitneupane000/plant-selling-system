@@ -296,3 +296,215 @@ export const sendProductDeletionEmail = async ({ toEmail, vendorName, productNam
   });
 };
 
+// ────────────────────────────────────────────────────────────────────────────
+// CANCELLATION & REFUND EMAILS
+// ────────────────────────────────────────────────────────────────────────────
+
+const emailLayout = (headerBg, headerTitle, headerSubtitle, bodyHtml) => `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; margin: 0; padding: 20px; }
+      .card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
+      .header { background: ${headerBg}; padding: 30px 20px; text-align: center; color: white; }
+      .header h1 { margin: 0; font-size: 24px; font-weight: 700; }
+      .header p  { margin: 5px 0 0 0; opacity: 0.9; }
+      .content { padding: 30px 24px; }
+      .footer { background: #f9fafb; padding: 20px; text-align: center; font-size: 12px; color: #9ca3af; border-top: 1px solid #e5e7eb; }
+      .btn { display: inline-block; background: #16a34a; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 14px; }
+      .info-box { border-radius: 8px; padding: 14px 16px; margin: 16px 0; font-size: 14px; line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="header">
+        <h1>🌱 PlantMarket</h1>
+        <p>${headerSubtitle}</p>
+      </div>
+      <div class="content">${bodyHtml}</div>
+      <div class="footer">
+        &copy; ${new Date().getFullYear()} PlantMarket. All rights reserved.<br>
+        Bringing nature closer to your home.
+      </div>
+    </div>
+  </body>
+  </html>
+`;
+
+const orderIdShort = (id) => id.slice(0, 8).toUpperCase();
+const fmtAmt = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+const dashboardUrl = process.env.CLIENT_URL ? `${process.env.CLIENT_URL}/customer/dashboard` : 'http://localhost:5173/customer/dashboard';
+
+/**
+ * Customer: COD order cancellation confirmation
+ */
+export const sendCODCancellationEmail = async ({ toEmail, customerName, order, reason }) => {
+  const shortId = orderIdShort(order.id);
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${customerName || 'Customer'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">Your order has been successfully <strong>cancelled</strong>. Since you paid by Cash on Delivery, no refund processing is needed.</p>
+    <div class="info-box" style="background:#fef3c7;border-left:4px solid #f59e0b;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Total:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      <strong>Reason:</strong> ${reason || '—'}
+    </div>
+    <p style="color:#6b7280;font-size:13px;">The stock for your cancelled items has been restored. You can browse and order again anytime.</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${dashboardUrl}" class="btn">View My Orders</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `✅ Order #${shortId} Cancelled — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#15803d,#166534)', 'Order Cancelled', 'COD Cancellation Confirmation', body),
+  });
+};
+
+/**
+ * Customer: prepaid cancellation request submitted
+ */
+export const sendCancellationRequestEmail = async ({ toEmail, customerName, order, reason }) => {
+  const shortId = orderIdShort(order.id);
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${customerName || 'Customer'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">We have received your <strong>cancellation request</strong> for Order <strong>#${shortId}</strong>. Our team will review and respond within 1–2 business days.</p>
+    <div class="info-box" style="background:#fef3c7;border-left:4px solid #f59e0b;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      <strong>Reason:</strong> ${reason || '—'}<br>
+      <strong>Status:</strong> Under Review
+    </div>
+    <p style="color:#6b7280;font-size:13px;">Once approved, your refund will be processed and you'll receive another email. Please do not place a new order for the same item until this is resolved.</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${dashboardUrl}" class="btn">Track My Order</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `⏳ Cancellation Request Submitted — Order #${shortId} — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#d97706,#b45309)', 'Cancellation Requested', 'Your request is under review', body),
+  });
+};
+
+/**
+ * Customer: cancellation approved, refund pending
+ */
+export const sendCancellationApprovedEmail = async ({ toEmail, customerName, order }) => {
+  const shortId = orderIdShort(order.id);
+  const payMethod = order.payment?.payment_method || 'online payment';
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${customerName || 'Customer'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">Great news! Your cancellation request for Order <strong>#${shortId}</strong> has been <strong>approved</strong>.</p>
+    <div class="info-box" style="background:#dcfce7;border-left:4px solid #16a34a;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Refund Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      <strong>Payment Method:</strong> ${payMethod}<br>
+      <strong>Refund Status:</strong> 🔄 Refund Pending
+    </div>
+    <p style="color:#6b7280;font-size:13px;">Our admin team will process the refund to your original payment method within 3–5 business days. You will receive another confirmation once it is completed.</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${dashboardUrl}" class="btn">View My Orders</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `✅ Cancellation Approved — Refund Pending — Order #${shortId} — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#15803d,#166534)', 'Cancellation Approved', 'Refund is being processed', body),
+  });
+};
+
+/**
+ * Customer: cancellation rejected
+ */
+export const sendCancellationRejectedEmail = async ({ toEmail, customerName, order, adminNote }) => {
+  const shortId = orderIdShort(order.id);
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${customerName || 'Customer'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">We regret to inform you that your cancellation request for Order <strong>#${shortId}</strong> could not be approved at this time.</p>
+    <div class="info-box" style="background:#fee2e2;border-left:4px solid #ef4444;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      ${adminNote ? `<strong>Admin Note:</strong> ${adminNote}` : ''}
+    </div>
+    <p style="color:#6b7280;font-size:13px;">Your order will continue as normal. If you have any questions, please contact our support team at <strong>${process.env.SUPPORT_EMAIL || 'plantmarket000@gmail.com'}</strong>.</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${dashboardUrl}" class="btn">View My Orders</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `❌ Cancellation Request Not Approved — Order #${shortId} — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#b91c1c,#991b1b)', 'Cancellation Not Approved', 'Your order will proceed as planned', body),
+  });
+};
+
+/**
+ * Customer: refund has been completed
+ */
+export const sendRefundCompletedEmail = async ({ toEmail, customerName, order, refundRef }) => {
+  const shortId = orderIdShort(order.id);
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${customerName || 'Customer'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">Your refund for Order <strong>#${shortId}</strong> has been <strong>processed successfully</strong>!</p>
+    <div class="info-box" style="background:#dcfce7;border-left:4px solid #16a34a;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Refund Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      ${refundRef ? `<strong>Reference:</strong> ${refundRef}` : ''}
+      <br><strong>Status:</strong> ✅ Refunded
+    </div>
+    <p style="color:#6b7280;font-size:13px;">The refund should appear in your account within 2–5 business days depending on your bank. Thank you for shopping with PlantMarket!</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${dashboardUrl}" class="btn">Browse Plants Again</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `💚 Refund Completed — Order #${shortId} — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#15803d,#166534)', 'Refund Completed', 'Your money is on its way', body),
+  });
+};
+
+/**
+ * Vendor: notification that an order from their store was cancelled
+ */
+export const sendVendorCancellationEmail = async ({ toEmail, vendorName, order }) => {
+  const shortId = orderIdShort(order.id);
+  const customerName = order.user?.name || 'A customer';
+  const body = `
+    <p style="font-size:16px;color:#374151;">Hi <strong>${vendorName || 'Vendor'}</strong>,</p>
+    <p style="color:#4b5563;line-height:1.5;">We are informing you that Order <strong>#${shortId}</strong> from <strong>${customerName}</strong> has been <strong>cancelled</strong>. The stock for the affected items has been restored to your inventory.</p>
+    <div class="info-box" style="background:#fef3c7;border-left:4px solid #f59e0b;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Customer:</strong> ${customerName}<br>
+      <strong>Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      <strong>Cancellation Reason:</strong> ${order.cancellation_reason || '—'}
+    </div>
+    <p style="color:#6b7280;font-size:13px;">No further action is required from you. The inventory has already been updated automatically.</p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `📦 Order #${shortId} Cancelled — PlantMarket Vendor Notice`,
+    html: emailLayout('linear-gradient(135deg,#d97706,#b45309)', 'Order Cancellation Notice', 'An order from your store was cancelled', body),
+  });
+};
+
+/**
+ * Admin: a customer has submitted a prepaid cancellation request
+ */
+export const sendAdminCancellationRequestEmail = async ({ toEmail, order, customer, vendor }) => {
+  const shortId = orderIdShort(order.id);
+  const adminDashUrl = process.env.CLIENT_URL ? `${process.env.CLIENT_URL}/admin/dashboard` : 'http://localhost:5173/admin/dashboard';
+  const body = `
+    <p style="font-size:16px;color:#374151;">A customer has submitted a <strong>cancellation request</strong> requiring admin review.</p>
+    <div class="info-box" style="background:#fef3c7;border-left:4px solid #f59e0b;">
+      <strong>Order:</strong> #${shortId}<br>
+      <strong>Customer:</strong> ${customer?.name || '—'} (${customer?.email || '—'})<br>
+      <strong>Vendor:</strong> ${vendor?.store_name || '—'}<br>
+      <strong>Amount:</strong> रू ${fmtAmt(order.total_amount)}<br>
+      <strong>Payment Method:</strong> ${order.payment?.payment_method || '—'}<br>
+      <strong>Reason:</strong> ${order.cancellation_reason || '—'}<br>
+      ${order.cancellation_detail ? `<strong>Detail:</strong> ${order.cancellation_detail}` : ''}
+    </div>
+    <p style="color:#6b7280;font-size:13px;">Please log in to the admin dashboard to approve or reject this request.</p>
+    <p style="margin-top:24px;text-align:center;"><a href="${adminDashUrl}" class="btn">Go to Admin Dashboard</a></p>
+  `;
+  return sendMail({
+    to: toEmail,
+    subject: `⚠️ Cancellation Request — Order #${shortId} Needs Review — PlantMarket`,
+    html: emailLayout('linear-gradient(135deg,#a855f7,#7c3aed)', 'Action Required', 'Cancellation request awaiting approval', body),
+  });
+};
+
+

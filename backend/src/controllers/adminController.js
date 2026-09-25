@@ -8,7 +8,7 @@ import logger from '../utils/logger.js';
  */
 export const getStats = async (req, res, next) => {
   try {
-    const [userCount, vendorCount, productCount, orderCount, revenue, pendingVendors] =
+    const [userCount, vendorCount, productCount, orderCount, revenue, pendingVendors, cancelledCount, refundPendingCount] =
       await Promise.all([
         prisma.user.count(),
         prisma.vendor.count(),
@@ -16,6 +16,8 @@ export const getStats = async (req, res, next) => {
         prisma.order.count(),
         prisma.order.aggregate({ _sum: { total_amount: true } }),
         prisma.vendor.count({ where: { verification_status: 'PENDING' } }),
+        prisma.order.count({ where: { OR: [{ status: 'CANCELLED' }, { status: 'CANCELLATION_REQUESTED' }] } }),
+        prisma.payment.count({ where: { refund_status: 'REFUND_PENDING' } }),
       ]);
 
     res.status(200).json({
@@ -28,12 +30,356 @@ export const getStats = async (req, res, next) => {
         orders: orderCount,
         revenue: Number(revenue._sum.total_amount || 0),
         pendingVendors,
+        cancelledOrders: cancelledCount,
+        refundPending: refundPendingCount,
       },
     });
   } catch (error) {
     next(error);
   }
 };
+
+/**
+ * GET /api/v1/admin/cancelled-orders
+ * List all cancelled, requested, evidence-requested, admin-review or refunded orders across platform.
+ */
+export const getCancelledOrders = async (req, res, next) => {
+  try {
+    const [orders, notifications] = await Promise.all([
+      prisma.order.findMany({
+        where: {
+          OR: [
+            { status: 'CANCELLED' },
+            { status: 'CANCELLATION_REQUESTED' },
+            { status: 'EVIDENCE_REQUESTED' },
+            { status: 'ADMIN_REVIEW' },
+            { cancellation_status: { in: ['REQUESTED', 'VENDOR_REVIEW', 'EVIDENCE_REQUESTED', 'ADMIN_REVIEW', 'APPROVED', 'REJECTED'] } },
+          ],
+        },
+        include: {
+          user: { select: { id: true, name: true, email: true, phone: true } },
+          order_items: {
+            include: {
+              product: {
+                select: {
+                  name: true,
+                  price: true,
+                  vendor: { select: { id: true, store_name: true, user: { select: { name: true, email: true } } } },
+                },
+              },
+            },
+          },
+          payment: true,
+          audit_logs: { orderBy: { created_at: 'desc' } },
+        },
+        orderBy: { updated_at: 'desc' },
+      }),
+      prisma.adminNotification.findMany({
+        orderBy: { created_at: 'desc' },
+        take: 30,
+      }),
+    ]);
+
+    res.status(200).json({ success: true, data: { orders, notifications } });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/v1/admin/notifications/:id/read
+ * Mark notification as read
+ */
+export const markNotificationRead = async (req, res, next) => {
+  try {
+    await prisma.adminNotification.update({
+      where: { id: req.params.id },
+      data: { is_read: true },
+    });
+    res.status(200).json({ success: true, message: 'Notification marked as read.' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+/**
+ * POST /api/v1/admin/orders/:id/approve-cancellation
+ * Admin approves prepaid cancellation request -> marks order CANCELLED, sets refund_status REFUND_PENDING, restores stock.
+ */
+export const approveCancellation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payment: true,
+        order_items: { include: { product: { include: { vendor: { include: { user: true } } } } } },
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found.',
+        error: { code: 'NOT_FOUND' },
+      });
+    }
+
+    const refCode = `REF-ADMIN-${Date.now().toString().slice(-6)}`;
+
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      // 1. Update order
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          status: 'CANCELLED',
+          cancellation_status: 'APPROVED',
+          cancelled_at: new Date(),
+          cancelled_by: 'ADMIN',
+        },
+        include: {
+          payment: true,
+          user: { select: { name: true, email: true } },
+        },
+      });
+
+      // 2. Update payment refund status
+      if (order.payment) {
+        await tx.payment.update({
+          where: { id: order.payment.id },
+          data: {
+            refund_status: 'REFUNDED',
+            refund_processed_at: new Date(),
+            refund_amount: order.total_amount,
+            refund_reference: refCode,
+            refund_processed_by: req.user.id,
+          },
+        });
+      }
+
+      // 3. Restore stock idempotently
+      if (order.status !== 'CANCELLED') {
+        for (const item of order.order_items) {
+          if (item.product_id) {
+            await tx.product.update({
+              where: { id: item.product_id },
+              data: { stock: { increment: item.quantity } },
+            });
+          }
+        }
+      }
+
+      // 4. Audit Log
+      await tx.refundAuditLog.create({
+        data: {
+          order_id: id,
+          actor_id: req.user.id,
+          actor_role: 'ADMIN',
+          action: 'APPROVED_AND_REFUNDED_BY_ADMIN',
+          previous_status: order.status,
+          new_status: 'REFUNDED',
+          reason_note: `Approved & Refunded by Admin. Ref: ${refCode}`,
+        },
+      });
+
+      return updated;
+    });
+
+
+    // Send emails asynchronously
+    (async () => {
+      try {
+        const { sendCancellationApprovedEmail, sendVendorCancellationEmail } = await import('../utils/email.js');
+        if (order.user?.email) {
+          await sendCancellationApprovedEmail({
+            toEmail: order.user.email,
+            customerName: order.user.name,
+            order: updatedOrder,
+          });
+        }
+
+        const vendorIds = [...new Set(order.order_items.map((i) => i.product?.vendor_id).filter(Boolean))];
+        for (const vId of vendorIds) {
+          const vendor = await prisma.vendor.findUnique({
+            where: { id: vId },
+            include: { user: { select: { email: true, name: true } } },
+          });
+          if (vendor?.user?.email) {
+            await sendVendorCancellationEmail({
+              toEmail: vendor.user.email,
+              vendorName: vendor.user.name || vendor.store_name,
+              order: updatedOrder,
+            });
+          }
+        }
+      } catch (err) {
+        logger.error(`Failed to send approve cancellation emails: ${err.message}`);
+      }
+    })();
+
+    res.status(200).json({
+      success: true,
+      message: 'Cancellation approved. Order marked as CANCELLED and refund marked as REFUND_PENDING.',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/admin/orders/:id/reject-cancellation
+ * Admin rejects cancellation request -> reverts order status to PROCESSING/PENDING.
+ */
+export const rejectCancellation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { note } = req.body;
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payment: true,
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found.',
+        error: { code: 'NOT_FOUND' },
+      });
+    }
+
+    if (order.status !== 'CANCELLATION_REQUESTED' && order.cancellation_status !== 'REQUESTED') {
+      return res.status(400).json({
+        success: false,
+        message: `Order is not pending cancellation review.`,
+        error: { code: 'INVALID_STATE' },
+      });
+    }
+
+    const updatedOrder = await prisma.order.update({
+      where: { id },
+      data: {
+        status: 'PROCESSING',
+        cancellation_status: 'REJECTED',
+      },
+      include: {
+        payment: true,
+        user: { select: { name: true, email: true } },
+      },
+    });
+
+    // Send email asynchronously
+    (async () => {
+      try {
+        const { sendCancellationRejectedEmail } = await import('../utils/email.js');
+        if (order.user?.email) {
+          await sendCancellationRejectedEmail({
+            toEmail: order.user.email,
+            customerName: order.user.name,
+            order: updatedOrder,
+            adminNote: note ? note.trim() : undefined,
+          });
+        }
+      } catch (err) {
+        logger.error(`Failed to send cancellation rejected email: ${err.message}`);
+      }
+    })();
+
+    res.status(200).json({
+      success: true,
+      message: 'Cancellation request rejected. Order status reverted to PROCESSING.',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/admin/orders/:id/mark-refund-completed
+ * Admin marks a pending refund as completed with a refund reference ID.
+ */
+export const markRefundCompleted = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { refund_reference } = req.body;
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payment: true,
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found.',
+        error: { code: 'NOT_FOUND' },
+      });
+    }
+
+    if (!order.payment) {
+      return res.status(400).json({
+        success: false,
+        message: 'Order has no payment record.',
+        error: { code: 'NO_PAYMENT' },
+      });
+    }
+
+    if (order.payment.refund_status !== 'REFUND_PENDING') {
+      return res.status(400).json({
+        success: false,
+        message: `Order refund status is not REFUND_PENDING (current: ${order.payment.refund_status || 'NONE'}).`,
+        error: { code: 'INVALID_STATE' },
+      });
+    }
+
+    const updatedPayment = await prisma.payment.update({
+      where: { id: order.payment.id },
+      data: {
+        refund_status: 'REFUNDED',
+        refund_processed_at: new Date(),
+        refund_reference: refund_reference ? refund_reference.trim() : `REF-${Date.now()}`,
+        refund_processed_by: req.user.id,
+      },
+    });
+
+    // Send email asynchronously
+    (async () => {
+      try {
+        const { sendRefundCompletedEmail } = await import('../utils/email.js');
+        if (order.user?.email) {
+          await sendRefundCompletedEmail({
+            toEmail: order.user.email,
+            customerName: order.user.name,
+            order,
+            refundRef: updatedPayment.refund_reference,
+          });
+        }
+      } catch (err) {
+        logger.error(`Failed to send refund completed email: ${err.message}`);
+      }
+    })();
+
+    res.status(200).json({
+      success: true,
+      message: 'Refund marked as COMPLETED.',
+      data: { payment: updatedPayment },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 
 /**
  * GET /api/v1/admin/users

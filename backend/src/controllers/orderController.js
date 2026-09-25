@@ -53,8 +53,16 @@ export const createOrder = async (req, res, next) => {
       return { product_id: item.product_id, quantity: item.quantity, price };
     });
 
-    // Create order and decrement stock atomically
+    // Create order and decrement stock atomically with stock re-verification
     const order = await prisma.$transaction(async (tx) => {
+      // Re-verify latest stock in transaction
+      for (const item of items) {
+        const dbProduct = await tx.product.findUnique({ where: { id: item.product_id } });
+        if (!dbProduct || dbProduct.stock < item.quantity) {
+          throw new Error(`Some items are no longer available in the requested quantity. Please review your cart.`);
+        }
+      }
+
       const orderData = {
         user_id: req.user.id,
         total_amount,
@@ -91,6 +99,7 @@ export const createOrder = async (req, res, next) => {
 
       return newOrder;
     });
+
 
     // Send order confirmation email asynchronously
     (async () => {
@@ -188,7 +197,7 @@ export const getVendorOrders = async (req, res, next) => {
 export const updateOrderStatus = async (req, res, next) => {
   try {
     const { status } = req.body;
-    const validStatuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
+    const validStatuses = ['PENDING', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'CANCELLATION_REQUESTED'];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
@@ -231,3 +240,320 @@ export const updateOrderStatus = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * POST /api/v1/orders/:id/cancel
+ * Customer directly cancels a Cash on Delivery order (if status is PENDING or PROCESSING).
+ */
+export const cancelOrder = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason, detail } = req.body;
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'A cancellation reason is required.',
+        error: { code: 'VALIDATION_ERROR' },
+      });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payment: true,
+        order_items: { include: { product: true } },
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found.',
+        error: { code: 'NOT_FOUND' },
+      });
+    }
+
+    if (order.user_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to cancel this order.',
+        error: { code: 'FORBIDDEN' },
+      });
+    }
+
+    if (!['PENDING', 'PROCESSING'].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Order cannot be cancelled in its current state (${order.status}).`,
+        error: { code: 'INVALID_STATE' },
+      });
+    }
+
+    if (order.payment?.payment_method !== 'CASH_ON_DELIVERY') {
+      return res.status(400).json({
+        success: false,
+        message: 'Direct cancellation is only available for Cash on Delivery orders. For prepaid orders, please submit a cancellation request.',
+        error: { code: 'METHOD_NOT_ALLOWED' },
+      });
+    }
+
+    // Cancel order and restore stock in transaction
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          status: 'CANCELLED',
+          cancellation_reason: reason.trim(),
+          cancellation_detail: detail ? detail.trim() : null,
+          cancelled_at: new Date(),
+          cancelled_by: 'CUSTOMER',
+          cancellation_status: 'APPROVED',
+        },
+        include: {
+          order_items: { include: { product: true } },
+          payment: true,
+          user: { select: { name: true, email: true } },
+        },
+      });
+
+      for (const item of order.order_items) {
+        if (item.product_id) {
+          await tx.product.update({
+            where: { id: item.product_id },
+            data: { stock: { increment: item.quantity } },
+          });
+        }
+      }
+
+      return updated;
+    });
+
+    // Asynchronously send emails
+    (async () => {
+      try {
+        const { sendCODCancellationEmail, sendVendorCancellationEmail } = await import('../utils/email.js');
+        if (order.user?.email) {
+          await sendCODCancellationEmail({
+            toEmail: order.user.email,
+            customerName: order.user.name,
+            order: updatedOrder,
+            reason: reason.trim(),
+          });
+        }
+
+        // Notify vendor(s)
+        const vendorIds = [...new Set(order.order_items.map(i => i.product?.vendor_id).filter(Boolean))];
+        for (const vId of vendorIds) {
+          const vendor = await prisma.vendor.findUnique({
+            where: { id: vId },
+            include: { user: { select: { email: true, name: true } } },
+          });
+          if (vendor?.user?.email) {
+            await sendVendorCancellationEmail({
+              toEmail: vendor.user.email,
+              vendorName: vendor.user.name || vendor.store_name,
+              order: updatedOrder,
+            });
+          }
+        }
+      } catch (err) {
+        logger.error(`Error sending cancellation emails: ${err.message}`);
+      }
+    })();
+
+    res.status(200).json({
+      success: true,
+      message: 'Order cancelled successfully.',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/v1/orders/:id/request-cancel
+ * Customer requests cancellation for a prepaid order (PENDING/PROCESSING status, COMPLETED payment).
+ */
+export const requestCancellation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason, detail } = req.body;
+    const files = req.files || [];
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: 'A cancellation reason is required.',
+        error: { code: 'VALIDATION_ERROR' },
+      });
+    }
+
+    if (reason.trim() === 'Other' && (!detail || !detail.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Additional Details are required when selecting "Other" as the reason.',
+        error: { code: 'VALIDATION_ERROR' },
+      });
+    }
+
+    const evidenceRequiredReasons = ['Damaged product', 'Wrong product received'];
+    if (evidenceRequiredReasons.includes(reason.trim()) && files.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `At least one supporting evidence file is required for "${reason.trim()}".`,
+        error: { code: 'EVIDENCE_REQUIRED' },
+      });
+    }
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        payment: true,
+        order_items: { include: { product: { include: { vendor: { include: { user: true } } } } } },
+        user: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found.',
+        error: { code: 'NOT_FOUND' },
+      });
+    }
+
+    if (order.user_id !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'You are not authorized to request cancellation for this order.',
+        error: { code: 'FORBIDDEN' },
+      });
+    }
+
+    if (!['PENDING', 'PROCESSING'].includes(order.status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Cancellation cannot be requested for order in status: ${order.status}.`,
+        error: { code: 'INVALID_STATE' },
+      });
+    }
+
+    if (order.cancellation_status === 'REQUESTED' || order.status === 'CANCELLATION_REQUESTED') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cancellation has already been requested for this order.',
+        error: { code: 'DUPLICATE_REQUEST' },
+      });
+    }
+
+    const evidenceUrls = files.map((f) => `/uploads/${f.filename}`);
+
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
+        where: { id },
+        data: {
+          status: 'CANCELLATION_REQUESTED',
+          cancellation_reason: reason.trim(),
+          cancellation_detail: detail ? detail.trim() : null,
+          cancellation_evidence: evidenceUrls.length > 0 ? JSON.stringify(evidenceUrls) : null,
+          cancellation_requested_at: new Date(),
+          cancellation_status: 'VENDOR_REVIEW',
+        },
+        include: { payment: true, user: { select: { name: true, email: true } } },
+      });
+
+      if (order.payment) {
+        await tx.payment.update({
+          where: { id: order.payment.id },
+          data: { refund_status: 'VENDOR_REVIEW', refund_requested_at: new Date() },
+        });
+      }
+
+      await tx.refundAuditLog.create({
+        data: {
+          order_id: id,
+          actor_id: req.user.id,
+          actor_role: 'CUSTOMER',
+          action: 'REQUESTED_CANCELLATION',
+          previous_status: order.status,
+          new_status: 'VENDOR_REVIEW',
+          reason_note: `${reason.trim()}${detail ? `: ${detail.trim()}` : ''}`,
+        },
+      });
+
+      return updated;
+    });
+
+    // Send emails asynchronously
+    (async () => {
+      try {
+        const { sendCancellationRequestEmail } = await import('../utils/email.js');
+        if (order.user?.email) {
+          await sendCancellationRequestEmail({
+            toEmail: order.user.email,
+            customerName: order.user.name,
+            order: updatedOrder,
+            reason: reason.trim(),
+          });
+        }
+      } catch (err) {
+        logger.error(`Error sending cancellation request emails: ${err.message}`);
+      }
+    })();
+
+    res.status(200).json({
+      success: true,
+      message: 'Cancellation request submitted successfully and routed to Vendor for review.',
+      data: { order: updatedOrder },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+
+/**
+ * GET /api/v1/orders/cancelled/vendor
+ * Vendor views cancelled orders containing their products.
+ */
+export const getVendorCancelledOrders = async (req, res, next) => {
+  try {
+    const vendor = await prisma.vendor.findUnique({ where: { user_id: req.user.id } });
+
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendor profile not found.',
+        error: { code: 'VENDOR_NOT_FOUND' },
+      });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: {
+        order_items: { some: { product: { vendor_id: vendor.id } } },
+        OR: [
+          { status: 'CANCELLED' },
+          { status: 'CANCELLATION_REQUESTED' },
+          { cancellation_status: { in: ['REQUESTED', 'APPROVED', 'REJECTED'] } },
+        ],
+      },
+      include: {
+        user: { select: { name: true, email: true } },
+        order_items: {
+          where: { product: { vendor_id: vendor.id } },
+          include: { product: { select: { name: true, price: true } } },
+        },
+        payment: true,
+      },
+      orderBy: { updated_at: 'desc' },
+    });
+
+    res.status(200).json({ success: true, data: { orders } });
+  } catch (error) {
+    next(error);
+  }
+};
+

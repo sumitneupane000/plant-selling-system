@@ -16,6 +16,7 @@ import orderRoutes from './routes/orders.js';
 import adminRoutes from './routes/admin.js';
 import cartRoutes from './routes/cart.js';
 import paymentRoutes from './routes/payment.js';
+import vendorRefundRoutes from './routes/vendorRefunds.js';
 
 // dotenv already loaded at top of file
 
@@ -25,13 +26,6 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // 1. Security Middlewares
-// Configure helmet with a custom CSP that allows:
-//   - Images from localhost:5000 (locally saved product uploads)
-//   - Images from any HTTPS source (vendor-pasted external URLs)
-//   - data: URIs (inline images / base64)
-// Also disable Cross-Origin-Resource-Policy (CORP) — its default value
-// 'same-origin' blocks the browser from loading localhost:5000 images on
-// the frontend page at localhost:5173, even when CORS is explicitly allowed.
 const clientOrigin = process.env.CLIENT_URL || 'http://localhost:5173';
 const serverOrigin = `http://localhost:${process.env.PORT || 5000}`;
 app.use(
@@ -40,23 +34,20 @@ app.use(
     contentSecurityPolicy: {
       directives: {
         ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-        // Allow images from self, the backend server, any https, and data URIs
         'img-src': ["'self'", serverOrigin, clientOrigin, 'https:', 'data:'],
       },
     },
   })
 );
 
-// Allow the Vite dev server (5173) and any CLIENT_URL set in .env
 const allowedOrigins = [
   process.env.CLIENT_URL,
   'http://localhost:5173',
   'http://localhost:3000',
-].filter(Boolean); // remove undefined/null entries
+].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (curl, Postman, mobile apps)
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error(`CORS: origin '${origin}' not allowed`));
@@ -64,29 +55,9 @@ app.use(cors({
   credentials: true,
 }));
 
-// Serve locally uploaded product images AFTER CORS so cross-origin
-// image requests from the frontend (port 5173) include the correct
-// Access-Control-Allow-Origin header.
+// Serve locally uploaded files and evidence
 app.use('/uploads', express.static(path.join(__dirname, '..', 'public', 'uploads')));
-
-// Rate limiter: Max 100 requests per 15 minutes (Disabled for development)
-/*
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 100, 
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: 'Too many requests from this IP, please try again after 15 minutes',
-    error: {
-      code: 'TOO_MANY_REQUESTS',
-      details: 'Rate limit exceeded'
-    }
-  }
-});
-app.use('/api', limiter);
-*/
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // 2. Request Parsing Middlewares
 app.use(express.json());
@@ -106,6 +77,8 @@ app.use('/api/v1/orders', orderRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/cart', cartRoutes);
 app.use('/api/v1/payment', paymentRoutes);
+app.use('/api/v1/vendor', vendorRefundRoutes);
+
 
 // Root path diagnostic route
 app.get('/api/v1/health', (req, res) => {

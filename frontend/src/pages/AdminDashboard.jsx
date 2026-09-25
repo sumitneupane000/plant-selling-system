@@ -5,21 +5,23 @@ import {
   getAdminStats, getAdminUsers, getAdminVendors, verifyVendor,
   getAdminProducts, deleteAdminProduct, getAdminOrders, getAdminCategories,
   createAdminCategory, deleteAdminCategory,
+  getAdminCancelledOrders, approveCancellation, rejectCancellation, markRefundCompleted,
 } from '../api/adminAPI.js';
 import { getPaymentLabel, isOnlinePayment } from '../utils/paymentUtils.js';
 import '../styles/dashboard.css';
 
-const TABS = ['Overview', 'Users', 'Vendors', 'Products', 'Orders', 'Categories'];
+const TABS = ['Overview', 'Users', 'Vendors', 'Products', 'Orders', 'Cancelled Orders', 'Categories'];
 
 const statusPillClass = (s) => {
   const map = {
     PENDING: 'status-pill--pending', APPROVED: 'status-pill--approved',
     REJECTED: 'status-pill--rejected', PROCESSING: 'status-pill--processing',
     SHIPPED: 'status-pill--shipped', DELIVERED: 'status-pill--delivered',
-    CANCELLED: 'status-pill--cancelled',
+    CANCELLED: 'status-pill--cancelled', CANCELLATION_REQUESTED: 'status-pill--cancellation-requested',
   };
   return `status-pill ${map[s] || 'status-pill--pending'}`;
 };
+
 
 const fmt = (n) => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
@@ -203,13 +205,19 @@ const AdminDashboard = () => {
   const [users, setUsers]       = useState([]);
   const [vendors, setVendors]   = useState([]);
   const [products, setProducts] = useState([]);
-  const [orders, setOrders]     = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [loading, setLoading]   = useState(false);
+  const [orders, setOrders]          = useState([]);
+  const [cancelledOrders, setCancelledOrders] = useState([]);
+  const [categories, setCategories]  = useState([]);
+  const [loading, setLoading]        = useState(false);
   const [showCatModal, setShowCatModal] = useState(false);
   const [deleteProductModal, setDeleteProductModal] = useState(null);
-  const [verifying, setVerifying] = useState({});
-  const [search, setSearch]     = useState('');
+  const [rejectModalOrder, setRejectModalOrder] = useState(null);
+  const [rejectNote, setRejectNote] = useState('');
+  const [refundModalOrder, setRefundModalOrder] = useState(null);
+  const [refundRefInput, setRefundRefInput] = useState('');
+  const [actionLoading, setActionLoading] = useState(false);
+  const [verifying, setVerifying]    = useState({});
+  const [search, setSearch]        = useState('');
 
   const handleLogout = async () => { await logout(); navigate('/login', { replace: true }); };
 
@@ -221,15 +229,64 @@ const AdminDashboard = () => {
   const load = useCallback(async (t) => {
     setLoading(true);
     try {
-      if (t === 'Overview')    { const r = await getAdminStats();    setStats(r.data.data); }
-      if (t === 'Users')       { const r = await getAdminUsers();    setUsers(r.data.data.users); }
-      if (t === 'Vendors')     { const r = await getAdminVendors();  setVendors(r.data.data.vendors); }
-      if (t === 'Products')    { const r = await getAdminProducts(); setProducts(r.data.data.products); }
-      if (t === 'Orders')      { const r = await getAdminOrders();   setOrders(r.data.data.orders); }
-      if (t === 'Categories')  { const r = await getAdminCategories(); setCategories(r.data.data.categories); }
+      if (t === 'Overview')         { const r = await getAdminStats();           setStats(r.data.data); }
+      if (t === 'Users')            { const r = await getAdminUsers();           setUsers(r.data.data.users); }
+      if (t === 'Vendors')          { const r = await getAdminVendors();         setVendors(r.data.data.vendors); }
+      if (t === 'Products')         { const r = await getAdminProducts();        setProducts(r.data.data.products); }
+      if (t === 'Orders')           { const r = await getAdminOrders();          setOrders(r.data.data.orders); }
+      if (t === 'Cancelled Orders') { const r = await getAdminCancelledOrders(); setCancelledOrders(r.data.data.orders); }
+      if (t === 'Categories')       { const r = await getAdminCategories();      setCategories(r.data.data.categories); }
     } catch { /* errors shown inline */ }
     finally { setLoading(false); }
   }, []);
+
+  const [approveModalOrder, setApproveModalOrder] = useState(null);
+
+  const handleApproveCancellation = async () => {
+    if (!approveModalOrder) return;
+    setActionLoading(true);
+    try {
+      await approveCancellation(approveModalOrder.id);
+      setApproveModalOrder(null);
+      load('Cancelled Orders');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to approve cancellation.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+
+  const handleRejectCancellation = async () => {
+    if (!rejectModalOrder) return;
+    setActionLoading(true);
+    try {
+      await rejectCancellation(rejectModalOrder.id, rejectNote);
+      setRejectModalOrder(null);
+      setRejectNote('');
+      load('Cancelled Orders');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to reject cancellation.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleMarkRefundCompleted = async () => {
+    if (!refundModalOrder) return;
+    setActionLoading(true);
+    try {
+      await markRefundCompleted(refundModalOrder.id, refundRefInput);
+      setRefundModalOrder(null);
+      setRefundRefInput('');
+      load('Cancelled Orders');
+    } catch (err) {
+      alert(err.response?.data?.message || 'Failed to mark refund completed.');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
 
   useEffect(() => { load(tab); }, [tab, load]);
 
@@ -285,6 +342,7 @@ const AdminDashboard = () => {
               {t === 'Vendors' && '🏪 '}
               {t === 'Products' && '🌱 '}
               {t === 'Orders' && '📦 '}
+              {t === 'Cancelled Orders' && '🚫 '}
               {t === 'Categories' && '🏷 '}
               {t}
             </button>
@@ -294,40 +352,61 @@ const AdminDashboard = () => {
         {loading && <div className="loading-state"><div className="spinner" /><p>Loading…</p></div>}
 
         {/* ── Overview ── */}
-        {!loading && tab === 'Overview' && stats && (
-          <div className="stat-grid">
-            <div className="stat-card stat-card--green">
-              <div className="stat-icon">👥</div>
-              <div className="stat-value">{stats.users}</div>
-              <div className="stat-label">Total Users</div>
+        {!loading && tab === 'Overview' && (
+          stats ? (
+            <div className="stat-grid">
+              <div className="stat-card stat-card--green">
+                <div className="stat-icon">👥</div>
+                <div className="stat-value">{stats.users}</div>
+                <div className="stat-label">Total Users</div>
+              </div>
+              <div className="stat-card stat-card--blue">
+                <div className="stat-icon">🏪</div>
+                <div className="stat-value">{stats.vendors}</div>
+                <div className="stat-label">Total Vendors</div>
+              </div>
+              <div className="stat-card stat-card--warning">
+                <div className="stat-icon">⏳</div>
+                <div className="stat-value">{stats.pendingVendors}</div>
+                <div className="stat-label">Pending Approval</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-icon">🌱</div>
+                <div className="stat-value">{stats.products}</div>
+                <div className="stat-label">Products Listed</div>
+              </div>
+              <div className="stat-card stat-card--purple">
+                <div className="stat-icon">📦</div>
+                <div className="stat-value">{stats.orders}</div>
+                <div className="stat-label">Total Orders</div>
+              </div>
+              <div className="stat-card stat-card--warning">
+                <div className="stat-icon">🚫</div>
+                <div className="stat-value">{stats.cancelledOrders ?? 0}</div>
+                <div className="stat-label">Cancelled / Requests</div>
+              </div>
+              <div className="stat-card stat-card--warning">
+                <div className="stat-icon">🔄</div>
+                <div className="stat-value">{stats.refundPending ?? 0}</div>
+                <div className="stat-label">Refunds Pending</div>
+              </div>
+              <div className="stat-card stat-card--green">
+                <div className="stat-icon">💰</div>
+                <div className="stat-value">रू{fmt(stats.revenue)}</div>
+                <div className="stat-label">Total Revenue</div>
+              </div>
             </div>
-            <div className="stat-card stat-card--blue">
-              <div className="stat-icon">🏪</div>
-              <div className="stat-value">{stats.vendors}</div>
-              <div className="stat-label">Total Vendors</div>
+          ) : (
+            <div className="empty-state">
+              <div className="empty-icon">📊</div>
+              <p className="empty-text">Failed to load platform statistics.</p>
+              <button className="btn btn--primary" style={{ marginTop: 12 }} onClick={() => load('Overview')}>
+                🔄 Retry
+              </button>
             </div>
-            <div className="stat-card stat-card--warning">
-              <div className="stat-icon">⏳</div>
-              <div className="stat-value">{stats.pendingVendors}</div>
-              <div className="stat-label">Pending Approval</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-icon">🌱</div>
-              <div className="stat-value">{stats.products}</div>
-              <div className="stat-label">Products Listed</div>
-            </div>
-            <div className="stat-card stat-card--purple">
-              <div className="stat-icon">📦</div>
-              <div className="stat-value">{stats.orders}</div>
-              <div className="stat-label">Total Orders</div>
-            </div>
-            <div className="stat-card stat-card--green">
-              <div className="stat-icon">💰</div>
-              <div className="stat-value">रू{fmt(stats.revenue)}</div>
-              <div className="stat-label">Platform Revenue</div>
-            </div>
-          </div>
+          )
         )}
+
 
         {/* ── Users ── */}
         {!loading && tab === 'Users' && (
@@ -503,6 +582,130 @@ const AdminDashboard = () => {
           </>
         )}
 
+        {/* ── Cancelled Orders ── */}
+        {!loading && tab === 'Cancelled Orders' && (
+          <>
+            <div className="section-header">
+              <h3 className="section-title">Cancelled & Refund Requests ({cancelledOrders.length})</h3>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Order ID</th>
+                    <th>Customer</th>
+                    <th>Reason</th>
+                    <th>Total</th>
+                    <th>Payment / Refund</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cancelledOrders.map((o) => (
+                    <tr key={o.id}>
+                      <td style={{ fontFamily: 'monospace', fontSize: '12px' }}>{o.id.slice(0, 8)}…</td>
+                      <td>
+                        <strong>{o.user?.name}</strong><br />
+                        <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.4)' }}>{o.user?.email}</span>
+                      </td>
+                      <td>
+                        <strong style={{ color: '#fde68a' }}>{o.cancellation_reason || '—'}</strong>
+                        {o.cancellation_detail && (
+                          <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.5)', marginTop: 2 }}>{o.cancellation_detail}</div>
+                        )}
+                        {(() => {
+                          let evs = [];
+                          try { if (o.cancellation_evidence) evs = JSON.parse(o.cancellation_evidence); } catch { evs = []; }
+                          return evs.length > 0 ? (
+                            <div style={{ marginTop: 4, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                              {evs.map((e, idx) => (
+                                <a key={idx} href={`http://localhost:5000${e}`} target="_blank" rel="noreferrer" style={{ fontSize: 10, color: '#60a5fa', textDecoration: 'underline' }}>
+                                  📎 Evidence #{idx + 1}
+                                </a>
+                              ))}
+                            </div>
+                          ) : null;
+                        })()}
+                        {o.audit_logs?.length > 0 && (
+                          <details style={{ marginTop: 6, fontSize: 10, color: 'rgba(255,255,255,0.5)' }}>
+                            <summary style={{ cursor: 'pointer', color: '#a78bfa' }}>📜 Audit History ({o.audit_logs.length})</summary>
+                            <div style={{ marginTop: 4, background: 'rgba(0,0,0,0.3)', padding: 6, borderRadius: 4 }}>
+                              {o.audit_logs.map((log) => (
+                                <div key={log.id} style={{ marginBottom: 4, borderBottom: '1px dashed rgba(255,255,255,0.1)', paddingBottom: 2 }}>
+                                  <strong>[{log.actor_role}]</strong> {log.action}: {log.from_state} ➔ {log.to_state} ({new Date(log.created_at).toLocaleTimeString()})
+                                  {log.note && <div style={{ fontStyle: 'italic', color: 'rgba(255,255,255,0.7)' }}>"{log.note}"</div>}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </td>
+                      <td style={{ color: '#86efac', fontWeight: 600 }}>रू{fmt(o.total_amount)}</td>
+                      <td>
+                        <div style={{ fontSize: '12px' }}>
+                          <strong>{getPaymentLabel(o)}</strong>
+                          {o.payment?.refund_status && (
+                            <div style={{ marginTop: 4 }}>
+                              <span className={`status-pill ${o.payment.refund_status === 'REFUNDED' ? 'status-pill--refunded' : 'status-pill--refund-pending'}`}>
+                                {o.payment.refund_status}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <span className={statusPillClass(o.status)}>{o.status}</span>
+                      </td>
+
+                      <td>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          {(o.status === 'CANCELLATION_REQUESTED' || o.cancellation_status === 'REQUESTED') && (
+                            <>
+                              <button
+                                className="btn btn--approve"
+                                disabled={actionLoading}
+                                onClick={() => setApproveModalOrder(o)}
+                              >
+                                ✓ Approve
+                              </button>
+
+                              <button
+                                className="btn btn--reject"
+                                disabled={actionLoading}
+                                onClick={() => setRejectModalOrder(o)}
+                              >
+                                ✕ Reject
+                              </button>
+                            </>
+                          )}
+
+                          {o.payment?.refund_status === 'REFUND_PENDING' && (
+                            <button
+                              className="btn btn--primary btn--sm"
+                              disabled={actionLoading}
+                              onClick={() => { setRefundModalOrder(o); setRefundRefInput(`REF-${Date.now().toString().slice(-6)}`); }}
+                            >
+                              💸 Mark Refunded
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                  {cancelledOrders.length === 0 && (
+                    <tr>
+                      <td colSpan={7} style={{ textAlign: 'center', color: 'rgba(255,255,255,0.3)', padding: '24px' }}>
+                        No cancelled orders or cancellation requests.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
         {/* ── Categories ── */}
         {!loading && tab === 'Categories' && (
           <>
@@ -548,9 +751,99 @@ const AdminDashboard = () => {
             onDeleted={handleProductDeleted}
           />
         )}
+
+        {approveModalOrder && (
+          <div className="modal-overlay" onClick={() => setApproveModalOrder(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '440px', border: '1px solid rgba(134,239,172,0.3)' }}>
+              <div style={{ textAlign: 'center', marginBottom: '14px' }}>
+                <span style={{ fontSize: '36px' }}>🌱</span>
+                <h3 className="modal-title" style={{ margin: '8px 0 4px', fontSize: '20px' }}>Approve Cancellation Request?</h3>
+              </div>
+              <p style={{ color: 'rgba(255,255,255,0.75)', fontSize: '14px', lineHeight: 1.6, marginBottom: '16px', textAlign: 'center' }}>
+                Approve this cancellation request? The order will be marked <strong style={{ color: '#fca5a5' }}>CANCELLED</strong>, stock will be <strong style={{ color: '#86efac' }}>restored</strong>, and refund marked as <strong style={{ color: '#fde68a' }}>PENDING</strong>.
+              </p>
+              <div style={{ background: 'rgba(0,0,0,0.3)', borderRadius: '10px', padding: '12px 16px', marginBottom: '20px', fontSize: '13px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.5)' }}>Order ID:</span>
+                  <span style={{ color: '#fff', fontFamily: 'monospace' }}>#{approveModalOrder.id.slice(0, 8).toUpperCase()}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.5)' }}>Customer:</span>
+                  <span style={{ color: '#fff' }}>{approveModalOrder.user?.name}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: 'rgba(255,255,255,0.5)' }}>Total Amount:</span>
+                  <span style={{ color: '#86efac', fontWeight: 700 }}>रू {fmt(approveModalOrder.total_amount)}</span>
+                </div>
+              </div>
+              <div className="form-actions">
+                <button className="btn btn--danger" onClick={() => setApproveModalOrder(null)} disabled={actionLoading}>
+                  Back
+                </button>
+                <button className="btn btn--primary" onClick={handleApproveCancellation} disabled={actionLoading}>
+                  {actionLoading ? 'Approving…' : '✅ Approve Cancellation'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {rejectModalOrder && (
+
+          <div className="modal-overlay" onClick={() => setRejectModalOrder(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '440px' }}>
+              <h3 className="modal-title">✕ Reject Cancellation Request</h3>
+              <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '13px', marginBottom: '14px' }}>
+                Order #{rejectModalOrder.id.slice(0, 8).toUpperCase()} will revert to PROCESSING. You can provide an optional note to the customer.
+              </p>
+              <div className="form-field">
+                <label>Rejection Reason / Note (Optional)</label>
+                <textarea
+                  rows={3}
+                  value={rejectNote}
+                  onChange={(e) => setRejectNote(e.target.value)}
+                  placeholder="e.g. Item has already been packaged and dispatched…"
+                />
+              </div>
+              <div className="form-actions">
+                <button className="btn btn--danger" onClick={() => setRejectModalOrder(null)}>Cancel</button>
+                <button className="btn btn--primary" onClick={handleRejectCancellation} disabled={actionLoading}>
+                  {actionLoading ? 'Rejecting…' : 'Confirm Rejection'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {refundModalOrder && (
+          <div className="modal-overlay" onClick={() => setRefundModalOrder(null)}>
+            <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '440px' }}>
+              <h3 className="modal-title">💸 Complete Refund</h3>
+              <p style={{ color: 'rgba(255,255,255,0.7)', fontSize: '13px', marginBottom: '14px' }}>
+                Enter the bank / wallet refund transaction reference for Order #{refundModalOrder.id.slice(0, 8).toUpperCase()} (Amount: रू {fmt(refundModalOrder.total_amount)}).
+              </p>
+              <div className="form-field">
+                <label>Refund Reference ID / Txn Code *</label>
+                <input
+                  value={refundRefInput}
+                  onChange={(e) => setRefundRefInput(e.target.value)}
+                  placeholder="e.g. ESEWA-REF-998823"
+                  required
+                />
+              </div>
+              <div className="form-actions">
+                <button className="btn btn--danger" onClick={() => setRefundModalOrder(null)}>Cancel</button>
+                <button className="btn btn--primary" onClick={handleMarkRefundCompleted} disabled={actionLoading || !refundRefInput}>
+                  {actionLoading ? 'Saving…' : 'Mark as Refunded'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );
 };
 
 export default AdminDashboard;
+

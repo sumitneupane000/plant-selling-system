@@ -11,6 +11,11 @@ import {
   getCategories,
   createCategory,
   deleteCategory,
+  getCancelledOrders,
+  approveCancellation,
+  rejectCancellation,
+  markRefundCompleted,
+  markNotificationRead,
 } from '../controllers/adminController.js';
 
 const router = Router();
@@ -29,4 +34,13 @@ router.get('/categories',      getCategories);
 router.post('/categories',     createCategory);
 router.delete('/categories/:id', deleteCategory);
 
+// Cancellation & Refund Management
+router.get('/cancelled-orders',                     getCancelledOrders);
+router.post('/orders/:id/approve-cancellation',     approveCancellation);
+router.post('/orders/:id/reject-cancellation',      rejectCancellation);
+router.post('/orders/:id/mark-refund-completed',    markRefundCompleted);
+router.patch('/notifications/:id/read',             markNotificationRead);
+
 export default router;
+
+

@@ -329,3 +329,101 @@ export const deleteProduct = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * PATCH /api/v1/products/:id/stock
+ * Vendor modifies stock for their product atomically with confirmation validation.
+ */
+export const adjustProductStock = async (req, res, next) => {
+  try {
+    const { action, quantity } = req.body;
+    const { id } = req.params;
+
+    const qty = parseInt(quantity, 10);
+    if (!action || !['ADD', 'REMOVE'].includes(action) || isNaN(qty) || qty <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action must be ADD or REMOVE and quantity must be a positive integer.',
+        error: { code: 'INVALID_STOCK_ADJUSTMENT' },
+      });
+    }
+
+    const vendor = await prisma.vendor.findUnique({ where: { user_id: req.user.id } });
+    if (!vendor) {
+      return res.status(404).json({
+        success: false,
+        message: 'Vendor profile not found.',
+        error: { code: 'VENDOR_NOT_FOUND' },
+      });
+    }
+
+    const product = await prisma.product.findUnique({ where: { id } });
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found.',
+        error: { code: 'PRODUCT_NOT_FOUND' },
+      });
+    }
+
+    // Ownership check (Allow ADMIN or owning VENDOR)
+    if (req.user.role !== 'ADMIN' && product.vendor_id !== vendor.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only update stock for your own products.',
+        error: { code: 'FORBIDDEN' },
+      });
+    }
+
+    const previousStock = product.stock;
+    const stockChange = action === 'ADD' ? qty : -qty;
+    const newStock = previousStock + stockChange;
+
+    if (newStock < 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Insufficient stock. Current stock is ${previousStock}, cannot remove ${qty}.`,
+        error: { code: 'INSUFFICIENT_STOCK' },
+      });
+    }
+
+    // Atomic transaction update
+    const updatedProduct = await prisma.$transaction(async (tx) => {
+      const p = await tx.product.findUnique({ where: { id } });
+      const targetStock = p.stock + stockChange;
+      if (targetStock < 0) {
+        throw new Error(`Insufficient stock. Current stock is ${p.stock}`);
+      }
+      return await tx.product.update({
+        where: { id },
+        data: { stock: targetStock },
+        include: {
+          category: { select: { id: true, name: true } },
+          product_images: true,
+        },
+      });
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Stock updated successfully. ${product.name} stock changed from ${previousStock} to ${updatedProduct.stock}.`,
+      data: {
+        product: updatedProduct,
+        previousStock,
+        newStock: updatedProduct.stock,
+        action,
+        quantity: qty,
+      },
+    });
+  } catch (error) {
+    if (error.message.startsWith('Insufficient stock')) {
+      return res.status(400).json({
+        success: false,
+        message: error.message,
+        error: { code: 'INSUFFICIENT_STOCK' },
+      });
+    }
+    next(error);
+  }
+};
+

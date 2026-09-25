@@ -8,6 +8,7 @@ import {
   createProduct,
   updateProduct,
   deleteProduct,
+  adjustProductStock,
 } from '../controllers/productController.js';
 
 import upload from '../middleware/uploadMiddleware.js';
@@ -27,6 +28,8 @@ router.get('/:id', getProduct);
 // Vendor-only mutations
 router.post('/', protect, authorize('VENDOR'), upload.single('image'), createProduct);
 router.put('/:id', protect, authorize('VENDOR'), upload.single('image'), updateProduct);
+router.patch('/:id/stock', protect, authorize('VENDOR', 'ADMIN'), adjustProductStock);
 router.delete('/:id', protect, authorize('VENDOR'), deleteProduct);
 
 export default router;
+

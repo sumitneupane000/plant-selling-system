@@ -10,3 +10,11 @@ export const getAdminOrders    = ()        => api.get('/admin/orders');
 export const getAdminCategories  = ()     => api.get('/admin/categories');
 export const createAdminCategory = (data) => api.post('/admin/categories', data);
 export const deleteAdminCategory = (id)  => api.delete(`/admin/categories/${id}`);
+
+export const getAdminCancelledOrders = ()         => api.get('/admin/cancelled-orders');
+export const approveCancellation     = (id)       => api.post(`/admin/orders/${id}/approve-cancellation`);
+export const rejectCancellation      = (id, note) => api.post(`/admin/orders/${id}/reject-cancellation`, { note });
+export const markRefundCompleted     = (id, ref)  => api.post(`/admin/orders/${id}/mark-refund-completed`, { refund_reference: ref });
+export const markNotificationRead    = (id)       => api.patch(`/admin/notifications/${id}/read`);
+
+
