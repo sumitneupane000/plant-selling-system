@@ -91,6 +91,13 @@ app.get('/api/v1/health', (req, res) => {
   });
 });
 
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Plant Selling System API is running"
+  });
+});
+
 // 4. Not Found (404) Route Handler
 app.use((req, res, next) => {
   const error = new Error(`Not Found - ${req.originalUrl}`);
